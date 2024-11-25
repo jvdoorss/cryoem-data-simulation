@@ -231,7 +231,7 @@ def gencoords (N,d,rad=None,truncmask=False,trunctype='circ'):
             
         truncc = c[trunkmask,:]
     else:
-        trunkmask = n.ones((c.shape[0],),dtype=n.bool8)
+        trunkmask = n.ones((c.shape[0],),dtype=n.bool)
         truncc = c
  
     
@@ -320,14 +320,14 @@ def compute_interpolation_matrix(DTYPE_t[:,:,:] Rs, int N_dst, int N_src, float 
 
                     center = 0
                     for i in xrange(intD):
-                        center += (int_pti[i] + N_src/2)*strides[i]
+                        center += (int_pti[i] + N_src//2)*strides[i]
                         point[i] = int_pt[i] - int_pti[i]
                 
                     kernfunc(point, p, kvals)
                     for k in xrange(intksize):
                         inbounds = 1
                         for i in xrange(intD):
-                            cpti = int_pti[i] + p[k,i] + N_src/2
+                            cpti = int_pti[i] + p[k,i] + N_src//2
                             inbounds = inbounds and cpti >= 0 and cpti < N_src
 
                         if kvals[k] != 0 and inbounds:
@@ -443,15 +443,15 @@ def symmetrize_fspace_volume(CDTYPE_t[:,:,:] V,
     cdef unsigned int N_sym = symRs.shape[0]
     cdef unsigned int N2 = N**2
     cdef int tmp
-    cdef int N_2 = N/2
+    cdef int N_2 = N//2
     cdef DTYPE_t rad2_thresh = ((rad*N/2.0)+(kernsize/2)+1)**2
     cdef CDTYPE_t cV
     cdef int inbounds
     
     with nogil:
         for vi in xrange(N**3):
-            x = vi/N2
-            y = (vi % N2)/N
+            x = vi//N2
+            y = (vi % N2)//N
             z = (vi % N)
             pt[0] = <ITYPE_t>(x) - N_2
             pt[1] = <ITYPE_t>(y) - N_2
@@ -556,8 +556,8 @@ def symmetrize_volume(DTYPE_t[:,:,:] V,
 #         for vi in prange(N**3,schedule='static',num_threads=nthreads,nogil=True):
 #             thId = threadid()
             
-            x = vi/N2
-            y = (vi % N2)/N
+            x = vi//N2
+            y = (vi % N2)//N
             z = (vi % N)
             pt[thId,0] = x - N_2
             pt[thId,1] = y - N_2
@@ -634,7 +634,7 @@ def symmetrize_volume_z(DTYPE_t[:,:,:] V,
 #         for vi in prange(N**2,schedule='static',num_threads=nthreads,nogil=True):
 #             thId = threadid()
             
-            x = vi/N
+            x = vi//N
             y = vi % N
             pt[thId,0] = x - N_2
             pt[thId,1] = y - N_2

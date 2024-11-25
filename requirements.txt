@@ -1,0 +1,8 @@
+# scientific
+numpy
+scipy
+matplotlib
+
+# cython
+cython
+setuptools

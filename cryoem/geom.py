@@ -157,7 +157,7 @@ def gencoords (N,d,rad=None,truncmask=False,trunctype='circ'):
             
         truncc = c[trunkmask,:]
     else:
-        trunkmask = n.ones((c.shape[0],),dtype=n.bool8)
+        trunkmask = n.ones((c.shape[0],),dtype=n.bool)
         truncc = c
  
     

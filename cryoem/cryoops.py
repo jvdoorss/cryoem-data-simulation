@@ -1,91 +1,108 @@
-import geom
-import numpy as n
+'''
+Utilities for interpolating projected densities.
+'''
 
-# import pyximport; pyximport.install(setup_args={"include_dirs":n.get_include()},reload_support=True)
-import sincint
+from typing import Literal, Iterable
 
-precomputed_Rs = {}
-def compute_projection_matrix(projdirs,N,kern,kernsize,rad,projdirtype='dirs',sym=None, onlyRs=False, **kwargs):
-    projdirs = n.asarray(projdirs,dtype=n.float32)
-    if projdirtype == 'dirs':
-        # Input is a set of projection directions
-        dirhash = hash(projdirs.tostring())
-        if onlyRs and dirhash in precomputed_Rs:
-            Rs = precomputed_Rs[dirhash]
-        else:
-            Rs = n.vstack([geom.rotmat3D_dir(d)[:,0:2].reshape((1,3,2)) for d in projdirs])
-            if onlyRs:
-                precomputed_Rs[dirhash] = Rs
-    elif projdirtype == 'rots':
-        # Input is a set of rotation matrices mapping image space to protein space
-        Rs = projdirs
-    else:
-        assert False, 'Unknown projdirtype, must be either dirs or rots'
+import numpy as np
+from numpy.fft import fftshift, ifft, ifftshift
+
+from geom import rotmat3D_dir, memoize, rotmat2D, gencoords
+from sincint import compute_interpolation_matrix
+
+# Custom types
+from geom import Vec3D, Rot2D
+Projection = np.ndarray 
+'''3 x 2 `orthonormal` mapping'''
+Kernel = Literal['lanczos','sinc','linear','quad']
+'''Kernel type for interpolation'''
+
+@memoize
+def to_xy(normal: Vec3D) -> Projection:
+    '''projection onto perp plane, cached with memoize'''
+    return rotmat3D_dir(normal)[:,:2]
+
+@memoize
+def rot_2d(angle: float) -> Rot2D:
+    '''2D rotation over angle, cached with memoize'''
+    return rotmat2D(np.require(angle,dtype=np.float32))
+
+def compute_projection_matrix(projdirs: Iterable[Vec3D],
+                              N: int,
+                              kern: Kernel,
+                              kernsize: int,
+                              radius : float,
+                              projdirtype: Literal['dirs','rots'] = 'dirs',
+                              sym=None, 
+                              onlyRs: bool = False, 
+                              **kwargs):
+    projdirs = np.require(projdirs,dtype=np.float32)
+
+    match projdirtype:
+        case 'dirs':
+            projections = list(map(to_xy,projdirs))
+        case 'rots':
+            assert projdirs[0].shape == (3,2), f'Invalid rotations, shape is {projdirs[0].shape}, must be 3x2'
+            projections = projdirs
+        case _:
+            raise ValueError('Unknown projdirtype, must be either dirs or rots')
 
     if sym is None:
         symRs = None
     else:
-        symRs = n.vstack([ n.require(R,dtype=n.float32).reshape((1,3,3)) for R in sym.get_rotations()])
+        symRs = np.stack([ np.require(R,dtype=np.float32).reshape((3,3)) for R in sym.get_rotations()],axis = 0)
 
     if onlyRs:
-        return Rs
-    else:
-        return sincint.compute_interpolation_matrix(Rs,N,N,rad,kern,kernsize,symRs)
+        return projections
 
-precomputed_RIs = {}
-def compute_inplanerot_matrix(thetas,N,kern,kernsize,rad,N_src=None,onlyRs = False):
-    dirhash = hash(thetas.tostring())
-    if N_src is None:
-        N_src = N
-        scale = 1
-    else:
-        scale = float(N_src)/N
-    if onlyRs and dirhash in precomputed_RIs:
-        Rs = precomputed_RIs[dirhash]
-    else:
-        Rs = n.vstack([scale*geom.rotmat2D(n.require(th,dtype=n.float32)).reshape((1,2,2)) for th in thetas])
-        if onlyRs:
-            precomputed_RIs[dirhash] = Rs
-    if onlyRs:
-        return Rs
-    else:
-        return sincint.compute_interpolation_matrix(Rs,N,N_src,rad,kern,kernsize,None)
+    return compute_interpolation_matrix(projections,N,N,radius,kern,kernsize,symRs)
 
-def compute_shift_phases(pts,N,rad):
-    xy = geom.gencoords(N,2,rad)
-    N_T = xy.shape[0]
-    N_S = pts.shape[0]
-
-    S = n.empty((N_S,N_T),dtype=n.complex64)
-    for (i,(sx,sy)) in enumerate(pts):
-        S[i] = n.exp(2.0j*n.pi/N * (xy[:,0] * sx + xy[:,1] * sy))
-
-    return S
-
-def compute_premultiplier(N, kernel, kernsize, scale=512):
-    krange = int(N/2)
-    koffset = int((N/2)*scale)
-    x = n.arange(-scale*krange,scale*krange)/float(scale)
-
-    if kernel == 'lanczos':
-        a = kernsize/2
-        k = n.sinc(x)*n.sinc(x/a)*(n.abs(x) <= a)
-    elif kernel == 'sinc': 
-        a = kernsize/2.0
-        k = n.sinc(x)*(n.abs(x) <= a)
-    elif kernel == 'linear':
-        assert kernsize == 2
-        k = n.maximum(0.0, 1 - n.abs(x))
-    elif kernel == 'quad':
-        assert kernsize == 3
-        k = (n.abs(x) <= 0.5) * (1-2*x**2) + ((n.abs(x)<1)*(n.abs(x)>0.5)) * 2* (1-n.abs(x))**2
-    else:
-        assert False, 'Unknown kernel type'
-
-    sk = n.fft.fftshift(n.fft.ifft(n.fft.ifftshift(k))).real
-    premult = 1.0/(N*sk[int(koffset-krange):int(koffset+krange)])
+def compute_inplanerot_matrix(thetas: Iterable[float],
+                              N: int,
+                              kern,
+                              kernsize: int,
+                              radius: float,
+                              N_src: int = None,
+                              onlyRs: bool = False):
     
-    return premult
+    N_src = N if N_src is None else N_src
+    scale = N / N
+
+    rotations = np.stack([scale * rot_2d(th) for th in thetas], axis = 0)
+
+    if onlyRs:
+        return rotations
+    
+    return compute_interpolation_matrix(rotations,N,N_src,radius,kern,kernsize,None)
+
+def compute_shift_phases(pts: np.ndarray, N: int, rad: float) -> np.ndarray:
+    xy = gencoords(N,2,rad)
+    return np.exp(2.0j*np.pi/N * (pts @ xy.T))
+
+def compute_premultiplier(N: int, kernel: Kernel, kernsize: int, scale: int = 512) -> np.ndarray:
+    krange = N // 2
+    koffset = krange * scale
+    grid = np.linspace(-krange,krange,2*koffset)
+
+    match kernel:
+        case 'lanczos':
+            a = kernsize/2
+            spectrum = np.sinc(grid)*np.sinc(grid/a)*(np.abs(grid) <= a)
+        case 'sinc': 
+            a = kernsize/2.0
+            spectrum = np.sinc(grid)*(np.abs(grid) <= a)
+        case 'linear':
+            assert kernsize == 2
+            spectrum = np.maximum(0.0, 1 - np.abs(grid))
+        case 'quad':
+            assert kernsize == 3
+            spectrum = (np.abs(grid) <= 0.5) * (1-2*grid**2) + ((np.abs(grid)<1)*(np.abs(grid)>0.5)) * 2 * (1-np.abs(grid))**2
+        case _ :
+            raise ValueError('Unknown kernel type')
+
+    density = fftshift(ifft(ifftshift(spectrum))).real
+    return 1.0/(N*density[koffset-krange:koffset+krange])
+    
 
 if __name__ == '__main__':
     
@@ -97,7 +114,7 @@ if __name__ == '__main__':
     pm1 = compute_premultiplier(N,kern,kernsize,512)
     pm2 = compute_premultiplier(N,kern,kernsize,8192)
     
-    print(n.max(n.abs(pm1-pm2)))
+    print(np.max(np.abs(pm1-pm2)))
     
 
 

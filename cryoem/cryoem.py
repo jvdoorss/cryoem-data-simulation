@@ -1,150 +1,147 @@
-import numpy as n
-from geom import gencoords
-import scipy.ndimage.interpolation as spinterp
-import scipy.ndimage.filters as spfilter
+from typing import Tuple, Literal
 
-import sparsemul
+import numpy as np
+from scipy.ndimage import map_coordinates, gaussian_filter, zoom
+from scipy.sparse import csr_array
 
-def compute_density_moments(M,mu=None):
-    N = M.shape[0]
-    absM = (M**2).reshape((N**3,1))
-    absM /= n.sum(absM) 
-    coords = gencoords(N,3).reshape((N**3,3))
+from .geom import gencoords
+from .typing import Rot3D, Vec3D, Density
 
-    if mu == None:
-        wcoords = coords.reshape((N**3,3)) * absM
-        mu = n.sum(wcoords,axis=0).reshape((1,3))
 
-    wccoords = n.sqrt(absM/N**3) * (coords - mu)
-    covar = n.dot(wccoords.T,wccoords)
+def compute_density_moments(density: Density, mu: Vec3D = None) -> Tuple[np.ndarray,np.ndarray]:
+    '''calculate moments of the coordinate/frequency matrix TODO misleading function name'''
+    # Regularize
+    density = np.abs(density) # just to be sure, should always be the case
+    density /= density.sum()
+
+    # Reshape
+    N = len(density)
+    density = density.reshape((-1,1))
+    coords = gencoords(N,3).reshape((-1,3))
+
+    # Mean
+    mu = (density * coords).sum(axis=0) if mu is None else mu # 3-vector
+
+    # Covariance
+    wave_function = np.sqrt(density) * (coords - mu) # (N^3,3) array
+    covar = wave_function.T @ wave_function / N**3 # (3,3) array
 
     return mu, covar
 
-def rotate_density(M,R,t=None, upsamp=1.0):
-    assert len(M.shape) == 3
+def rotate_density(density: Density, R: Rot3D, t: float = 0.0, upsamp: float = 1.0) -> Density:
+    assert len(density.shape) == 3
 
-    N = M.shape[0]
+    N = density.shape[0]
+    Nup = int(N*upsamp)
+    coords = gencoords(Nup,3) / upsamp
 
-    Nup = int(n.round(N*upsamp))
-#     print "Upsampling by", upsamp, "to", Nup, "^3"
-    coords = gencoords(Nup,3).reshape((Nup**3,3)) / float(upsamp)
-    if t is None:
-        interp_coords = n.transpose(n.dot(coords, R.T)).reshape((3,Nup,Nup,Nup)) + N/2
-    else:
-        interp_coords = n.transpose(n.dot(coords, R.T) + t).reshape((3,Nup,Nup,Nup)) + N/2
-    out = spinterp.map_coordinates(M,interp_coords,order=1)
+    interp_coords = ((coords @ R.T) + t).transpose((3,0,1,2)) + N/2
+    return map_coordinates(density, interp_coords, order=1)
 
-    return out
+def align_density(density: Density, upsamp: float = 1.0) -> Tuple[Density, Rot3D]:
+    '''
+    Rotate a density to its `proper frame` aligned with its covariance matrix.
 
-def align_density(M, upsamp=1.0):
-    assert len(M.shape) == 3
+    The X axis will be the least spread out direction, the Z axis the most.
+    '''
+    assert len(density.shape) == 3
 
-    (mu,covar) = compute_density_moments(M)
+    mu, covar = compute_density_moments(density)
 
-    (w,V) = n.linalg.eigh(covar)
-    idx = w.argsort()
-    w = w[idx]
-    V = V[:,idx]
+    _,V = np.linalg.eigh(covar)
+    assert np.linalg.det(V) > 0
 
-    if n.linalg.det(V) < 0:
-        # ensure we have a valid rotation
-        V[:,0] *= -1
+    return rotate_density(density,V,mu,upsamp), V
 
-    out = rotate_density(M,V,mu,upsamp)
-
-#    (mu,covar) = compute_density_moments(out)
-
-    return out, V
-
-def rotational_average(M,maxRadius=None, doexpand=False, normalize=True, return_cnt=False):
-    N = M.shape[0]
-    D = len(M.shape)
+def radial_histogram(density: Density, integer_radii: Density, fractional_radii: Density, max_radius: float) -> np.ndarray:
+    '''count coordinates within an radial integer bin, weighted by their proximity to the target radius'''
+    if np.iscomplexobj(density):
+        real = radial_histogram(density.real,integer_radii, fractional_radii, max_radius)
+        imag = radial_histogram(density.imag,integer_radii, fractional_radii, max_radius)
+        return real + 1.0j * imag
+    
+    floor_contributions = np.bincount(integer_radii, 
+                                        weights=(1-fractional_radii)*density.imag, 
+                                        minlength=max_radius)[:max_radius]
+    ceil_contributions = np.bincount(integer_radii + 1, 
+                                        weights=fractional_radii*density.imag, 
+                                        minlength=max_radius)[:max_radius]
+    return floor_contributions + ceil_contributions
+    
+def rotational_average(density: Density, 
+                       maxRadius: float = None, 
+                       doexpand: bool = False, 
+                       normalize: bool = True, 
+                       return_cnt: bool = False) -> np.ndarray | Tuple[np.ndarray | Density, np.ndarray]:
+    '''
+    Returns occupation numbers of (integer) radial slices:
+    * weighted by density [normalize: relative to unweighted | doexpand: return interpolated values for the full grid]
+    * [return_cnt: unweighted occupation numbers]
+    '''
+    N = density.shape[0]
+    D = len(density.shape)
     
     assert D >= 2, 'Cannot rotationally average a 1D array'
 
-    pts = gencoords(N,D).reshape((N**D,D))
-    r = n.sqrt(n.sum(pts**2,axis=1)).reshape(M.shape)
-    ir = n.require(n.floor(r),dtype='uint32')
-    f = r - ir
+    pts = gencoords(N,D)
+    radius_grid: Density = np.linalg.norm(pts,axis=-1)
+    radius_grid_int = np.require(np.floor(radius_grid),dtype='uint32')
+    radius_grid_frac = radius_grid - radius_grid_int
 
     if maxRadius is None:
-        maxRadius = n.ceil(n.sqrt(D)*N/D)
+        maxRadius = np.ceil(N/np.sqrt(D))
 
-    if maxRadius < n.max(ir)+2:
-        valid_ir = ir+1 < maxRadius
-        ir = ir[valid_ir]
-        f = f[valid_ir]
-        M = M[valid_ir]
-
-    if n.iscomplexobj(M):
-        raps = 1.0j*n.bincount(ir, weights=(1-f)*M.imag, minlength=maxRadius) + \
-                    n.bincount(ir+1, weights=f*M.imag, minlength=maxRadius)
-        raps += n.bincount(ir, weights=(1-f)*M.real, minlength=maxRadius) + \
-                n.bincount(ir+1, weights=f*M.real, minlength=maxRadius)
-    else:
-        raps = n.bincount(ir, weights=(1-f)*M, minlength=maxRadius) + \
-               n.bincount(ir+1, weights=f*M, minlength=maxRadius)
-    raps = raps[0:maxRadius]
+    if maxRadius < np.max(radius_grid_int)+2:
+        valid_radius = radius_grid_int+1 < maxRadius
+        radius_grid_int = radius_grid_int[valid_radius]
+        radius_grid_frac = radius_grid_frac[valid_radius]
+        density = density[valid_radius]
+    
+    raps = radial_histogram(density,radius_grid_int,radius_grid_frac,maxRadius)
 
     if normalize or return_cnt:
-        cnt = n.bincount(ir, weights=(1-f), minlength=maxRadius) + \
-              n.bincount(ir+1, weights=f, minlength=maxRadius)
-        cnt = cnt[0:maxRadius]
+        cnt = radial_histogram(np.ones(density.shape),radius_grid_int,radius_grid_frac,maxRadius)
 
     if normalize:
-        raps[cnt <= 0] = 0
         raps[cnt > 0] /= cnt[cnt > 0]
 
     if doexpand:
-        raps = rotational_expand(raps,N,D)
+        raps = radial_expand(raps,radius_grid)
     
-    if return_cnt:
-        return raps, cnt
-    else:
-        return raps
+    return raps, cnt if return_cnt else raps
 
-def rotational_expand(vals,N,D,interp_order=1):
-    interp_coords = n.sqrt(n.sum(gencoords(N,D).reshape((N**D,D))**2,axis=1)).reshape((1,) + D*(N,))
-    if n.iscomplexobj(vals):
-        rotexp = 1.0j*spinterp.map_coordinates(vals.imag, interp_coords, 
-                                               order=interp_order, mode='nearest')
-        rotexp += spinterp.map_coordinates(vals.real, interp_coords, 
-                                           order=interp_order, mode='nearest')
-    else:
-        rotexp = spinterp.map_coordinates(vals, interp_coords, 
-                                          order=interp_order, mode='nearest')
-    return rotexp
+def radial_expand(radial_density: np.ndarray, radius_grid: Density, interp_order: int = 1) -> Density:
+    '''1D interpolation of integer spaced values in radial_density by target values in radial_grid'''
+    return map_coordinates(radial_density, radius_grid[None], order=interp_order, mode='nearest')
 
-def resize_ndarray(D,nsz,axes):
-    zfs = tuple([float(nsz[i])/float(D.shape[i]) if i in axes else 1 \
-                 for i in range(len(nsz))])
-    sigmas = tuple([0.66/zfs[i] if i in axes else 0 \
-                    for i in range(len(nsz))])
-#    print zfs, sigmas, D.shape
-#     print "blurring...", ; sys.stdout.flush()
-    blurD = spfilter.gaussian_filter(D,sigma=sigmas,order=0,mode='constant')
-#     print "zooming...", ; sys.stdout.flush()
-    return spinterp.zoom(blurD,zfs,order=0)
+def resize_ndarray(density: Density, new_shape: np.ndarray[float], axes: np.ndarray[int]):
+    '''reduce size of array by zooming out after blurring NOTE doesn't seem useful for upsampling, right?'''
+    zoom_factors = [new_size / old_size if axis in axes else 1 
+                    for old_size, new_size, axis in zip(density.shape, new_shape,range(42))]
+    sigmas = [0.66 / zoom_factor if axis in axes else 0 for axis, zoom_factor in enumerate(zoom_factors)]
+
+    blurred_density = gaussian_filter(density, sigma=sigmas, order=0, mode='constant')
+    return zoom(blurred_density, zoom_factors, order=0)
 
 def compute_fsc(VF1,VF2,maxrad,width=1.0,thresholds = [0.143,0.5]):
     assert VF1.shape == VF2.shape
     N = VF1.shape[0]
     
-    r = n.sqrt(n.sum(gencoords(N,3).reshape((N,N,N,3))**2,axis=3))
+    r = np.sqrt(np.sum(gencoords(N,3).reshape((N,N,N,3))**2,axis=3))
     
-    prev_rad = -n.inf
+    prev_rad = -np.inf
     fsc = []
     rads = []
     resInd = len(thresholds)*[None]
-    for i,rad in enumerate(n.arange(1.5,maxrad*N/2.0,width)):
-        cxyz = n.logical_and(r >= prev_rad,r < rad)
+    for i,rad in enumerate(np.arange(1.5,maxrad*N/2.0,width)):
+        cxyz = np.logical_and(r >= prev_rad,r < rad)
         cF1 = VF1[cxyz] 
         cF2 = VF2[cxyz]
         
         if len(cF1) == 0:
             break
         
-        cCorr = n.vdot(cF1,cF2) / n.sqrt(n.vdot(cF1,cF1)*n.vdot(cF2,cF2))
+        cCorr = np.vdot(cF1,cF2) / np.sqrt(np.vdot(cF1,cF1)*np.vdot(cF2,cF2))
         
         for j,thr in enumerate(thresholds):
             if cCorr < thr and resInd[j] is None:
@@ -153,15 +150,15 @@ def compute_fsc(VF1,VF2,maxrad,width=1.0,thresholds = [0.143,0.5]):
         rads.append(rad/(N/2.0))
         prev_rad = rad
 
-    fsc = n.array(fsc)
-    rads = n.array(rads)
+    fsc = np.array(fsc)
+    rads = np.array(rads)
 
     resolutions = []
     for rI,thr in zip(resInd,thresholds):
         if rI is None:
             resolutions.append(rads[-1])
         elif rI == 0:
-            resolutions.append(n.inf)
+            resolutions.append(np.inf)
         else:
             x = (thr - fsc[rI])/(fsc[rI-1] - fsc[rI])
             resolutions.append(x*rads[rI-1] + (1-x)*rads[rI])
@@ -180,91 +177,79 @@ def compute_fsc(VF1,VF2,maxrad,width=1.0,thresholds = [0.143,0.5]):
 # we can just fftshift the image since translations do not change the FFT except by phase. This makes the nyquist components
 # zero and everything is fine and dandy. Even linear iterpolation works then, except it leaves ghosting.
   
-def getslices (V, SLOP, res=None):
-    vV = V.reshape((-1,))
-
-    assert vV.shape[0] == SLOP.shape[1]
-
-    if res is None:
-        res = n.zeros(SLOP.shape[0],dtype=vV.dtype)
-    else:
-        assert res.shape[0] == SLOP.shape[0]
-        assert len(res.shape) == 1 or res.shape[1] == 1
-        assert res.dtype == vV.dtype
-        res[:] = 0
-
-    if n.iscomplexobj(vV):    
-        sparsemul.spdot(SLOP, vV.real, res.real)
-        sparsemul.spdot(SLOP, vV.imag, res.imag)
-    else:
-        sparsemul.spdot(SLOP, vV, res)
-        
-    return res
-    
+def getslices(V, SLOP) -> np.ndarray:
+    return csr_array(SLOP) @ V.reshape(-1)
+            
 # 3D Densities
 # ===============================================================================================    
 
-def window (v, func='hanning', params=None):
+def window( volume: Density, 
+            func: Literal['hanning','hamming','circle','box'] = 'hanning', 
+            params = [1.0]):
     """ applies a windowing function to the 3D volume v (inplace, as reference) """
     
-    N = v.shape[0]
-    D = v.ndim
-    if any( [ d != N for d in list(v.shape) ] ) or D != 3:
+    N = volume.shape[0]
+    D = volume.ndim
+    if any( [ d != N for d in list(volume.shape) ] ) or D != 3:
         raise Exception("Error: Volume is not Cube.")
     
-    def apply_seperable_window (v, w):
-        v *= n.reshape(w,(-1,1,1))
-        v *= n.reshape(w,(1,-1,1))
-        v *= n.reshape(w,(1,1,-1))
+    def apply_seperable_window (volume: Density, window_1d: np.ndarray[float]):
+        volume *= window_1d[:,None,None] * window_1d[None,:,None] * window_1d
     
-    if func=="hanning":
-        w = n.hanning(N)
-        apply_seperable_window(v,w)
-    elif func=='hamming':
-        w = n.hamming(N)
-        apply_seperable_window(v,w)
-    elif func=='gaussian':
-        raise Exception('Unimplimented')
-    elif func=='circle':
-        c = gencoords(N,3)
-        if params==None:
-            r = N/2 -1
-        else:
-            r = params[0]*(N/2*1)
-        v *= (n.sum(c**2,1)  < ( r ** 2 ) ).reshape((N,N,N))
-    elif func=='box':
-        v[:,0,0] = 0.0
-        v[0,:,0] = 0.0
-        v[0,0,:] = 0.0
-    else:
-        raise Exception("Error: Window Type Not Supported")
+    match func:
+        case "hanning":
+            w = np.hanning(N)
+            apply_seperable_window(volume,w)
+        case 'hamming':
+            w = np.hamming(N)
+            apply_seperable_window(volume,w)
+        case 'gaussian':
+            raise NotImplementedError()
+        case 'circle':
+            coordinates = gencoords(N,3)
+            r = params[0] * (N/2 - 1)
+            volume[np.sum(coordinates**2 , -1)  < ( r ** 2 )] = 0.0
+        case 'box':
+            volume[:,0,0] = 0.0
+            volume[0,:,0] = 0.0
+            volume[0,0,:] = 0.0
+        case _:
+            raise Exception("Error: Window Type Not Supported")
 
-def generate_phantom_density(N,window,sigma,num_blobs,seed=None):
+def random_unit_vector(size = None) -> Vec3D:
+    '''sample a sphericaly uniform unit vector'''
+    vectors = np.random.multivariate_normal(mean = np.zeros(3), cov=np.eye(3), size = size)
+    vectors /= np.linalg.norm(vectors,axis=-1,keepdims=True)
+    return vectors
+
+def generate_phantom_density(N: int, window_radius: float, sigma: float, num_blobs: int, seed: int = None) -> Density:
+    '''sequentially add Gaussian noise around a centr-ish point in space to form a density'''
     if seed is not None:
-        n.random.seed(seed)
-    M = n.zeros((N,N,N),dtype=n.float32)
+        np.random.seed(seed)
+    density = np.zeros((N,N,N),dtype=np.float32)
 
-    coords = gencoords(N,3).reshape((N**3,3))
-    inside_window = n.sum(coords**2,axis=1).reshape((N,N,N)) < window**2
+    coords = gencoords(N,3)
+    inside_window = np.sum(coords**2,axis=-1) < window_radius ** 2
 
-    curr_c = n.array([0.0, 0.0 ,0.0])
-    curr_n = 0
-    while curr_n < num_blobs:
-        csigma = sigma*n.exp(0.25*n.random.randn())
-        radM = n.sum((coords - curr_c.reshape((1,3)))**2,axis=1).reshape((N,N,N))
-        inside = n.logical_and(radM < (3*csigma)**2,inside_window)
-#        M[inside] = 1
-        M[inside] += n.exp(-0.5*(radM[inside]/csigma**2))
-        curr_n += 1
+    def add_gaussian_noise(density: Density, center: Vec3D, sigma: float):
+        coord_radii = np.linalg.norm(coords - center,axis=-1)
+        inside = (coord_radii < 3*sigma) & inside_window
+        density[inside] += np.exp(-0.5*(coord_radii[inside]/sigma**2))  
 
-        curr_dir = n.random.randn(3)
-        curr_dir /= n.sum(curr_dir**2)
-        curr_c += 2.0*csigma*curr_dir
-        curr_w = n.sqrt(n.sum(curr_c**2))
-        while curr_w > window:
-            curr_n_dir = curr_c/curr_w
-            curr_r_dir = (2*n.dot(curr_dir,curr_n_dir))*curr_n_dir - curr_dir
-            curr_c = curr_n_dir + (curr_w - window)*curr_r_dir
-            curr_w = n.sqrt(n.sum(curr_c**2))
+    def update_center(center: Vec3D, sigma: float) -> Vec3D:
+        '''search new center within window by moving back a forth relative to a chosen direction'''
+        delta_dir = random_unit_vector()
+        center += 2.0 * sigma * delta_dir
+        while (center_radius := np.linalg.norm(center)) > window_radius:
+            center_dir = center/center_radius
+            update_dir = 2 * delta_dir.dot(center_dir) * center_dir - delta_dir # flip delta about center, in their common plane
+            center[:] = center_dir + (center_radius - window_radius) * update_dir
 
-    return M
+    moving_center = np.zeros((3,))
+    blob_count = 0
+    while (blob_count := blob_count + 1) <= num_blobs:
+        inflated_sigma = sigma * np.exp(0.25 * np.random.randn())
+        add_gaussian_noise(density, moving_center, inflated_sigma)
+        update_center(moving_center, inflated_sigma)
+
+    return density

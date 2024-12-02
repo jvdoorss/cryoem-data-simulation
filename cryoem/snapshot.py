@@ -8,18 +8,13 @@ from dataclasses import dataclass, InitVar, field
 from scipy.sparse import sparray
 import numpy as np
 
-from cryoem.cryoem import random_unit_vector
-from cryoem.cryoio.ctf import compute_full_ctf
-from cryoem.cryoops import compute_projection_matrix, compute_shift_phases
-from cryoem.geom import genEA, rotmat3D_EA, gentrunctofull
-from cryoem.density import fspace_to_real
+from .cryoem import random_unit_vector
+from .cryoio.ctf import compute_full_ctf
+from .cryoops import compute_projection_matrix, compute_shift_phases
+from .geom import genEA, rotmat3D_EA, gentrunctofull
+from .density import fspace_to_real
+from .typing import Pixels, Voxels
 
-# Custom types
-from cryoem.cryoem import Density
-Voxels = Density
-'''Grid-like density in 3D'''
-Pixels = Density
-'''Grid-like density in 2D'''
 
 def random_euler_angles() -> np.ndarray[float]:
     '''generate euler angles, spherically uniformly distributed + psi'''

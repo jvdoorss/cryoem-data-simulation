@@ -2,20 +2,15 @@
 Utilities for interpolating projected densities.
 '''
 
-from typing import Literal, Iterable
+from typing import Literal, Iterable, List
 
 import numpy as np
 from numpy.fft import fftshift, ifft, ifftshift
 
-from geom import rotmat3D_dir, memoize, rotmat2D, gencoords
+from .geom import rotmat3D_dir, memoize, rotmat2D, gencoords
+from .typing import Vec3D, Rot2D, Projection, Kernel, GridMask
 from sincint import compute_interpolation_matrix
 
-# Custom types
-from geom import Vec3D, Rot2D
-Projection = np.ndarray 
-'''3 x 2 `orthonormal` mapping'''
-Kernel = Literal['lanczos','sinc','linear','quad']
-'''Kernel type for interpolation'''
 
 @memoize
 def to_xy(normal: Vec3D) -> Projection:

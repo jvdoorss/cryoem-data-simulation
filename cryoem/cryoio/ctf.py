@@ -1,5 +1,5 @@
-from util import memoize
-import geom
+from functools import cache as memoize
+from ..geom import gencoords
 import numpy as n
 
 def envelope_function(freq_radius,bfactor):
@@ -19,8 +19,8 @@ def compute_ctf(freqs,rots,akv,cs,wgh,dfmid1f,dfmid2f,angastf,dscale,bfactor=Non
     wgh1 = dscale*n.sqrt(1.0 - wgh**2)
     wgh2 = dscale*wgh
 
-    ix = freqs[:,0]
-    iy = freqs[:,1]
+    ix = freqs[...,0]
+    iy = freqs[...,1]
     freq_radius = n.sqrt(ix**2 + iy**2)
 
     angle = elambda*freq_radius
@@ -44,13 +44,13 @@ def compute_ctf(freqs,rots,akv,cs,wgh,dfmid1f,dfmid2f,angastf,dscale,bfactor=Non
 
 @memoize
 def compute_full_ctf(rots,N,psize,akv,csf,wgh,dfmid1,dfmid2,angastf,dscale,bfactor):
-    freqs = geom.gencoords(N,2)/(N*psize)
+    freqs = gencoords(N,2)/(N*psize)
     return compute_ctf(freqs,rots,akv,csf,wgh,dfmid1,dfmid2,angastf,dscale,bfactor)
 
 
 class CTFBase:
     def compute(self,freqs,rots=None):
-        raise exceptions.NotImplementedError()
+        raise NotImplementedError()
     
 class ParametricCTF(CTFBase):
     def __init__(self,params):
@@ -100,7 +100,7 @@ if __name__ == '__main__':
     N = 512
     psz = 5.6
     rad = 0.25
-    fcoords = geom.gencoords(N, 2, rad) / (N*psz)
+    fcoords = gencoords(N, 2, rad) / (N*psz)
     ctf1_rot = compute_full_ctf(rots,N,psz,akv,cs,wgh,df1,df2,angast,dscale,None)
     ctf2_full = compute_full_ctf(None,N,psz,akv,cs,wgh,df1,df2,angast,dscale,None)
 

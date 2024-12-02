@@ -4,12 +4,9 @@ import numpy as np
 from scipy.ndimage import map_coordinates, gaussian_filter, zoom
 from scipy.sparse import csr_array
 
-from geom import gencoords
+from .geom import gencoords
+from .typing import Rot3D, Vec3D, Density
 
-# Custyom types
-from geom import Rot3D, Vec3D
-Density = np.ndarray
-''' N x N x N array, one entry for each spatial point, e.g. a density'''
 
 def compute_density_moments(density: Density, mu: Vec3D = None) -> Tuple[np.ndarray,np.ndarray]:
     '''calculate moments of the coordinate/frequency matrix TODO misleading function name'''

@@ -5,7 +5,7 @@ import numpy as np
 from numpy.fft import fftshift, ifftshift
 
 # Custom types
-from cryoem.cryoem import Density
+from .typing import Density, Voxels, Projection, Grid, GridMask
 
 def get_fft_module():
     try:
